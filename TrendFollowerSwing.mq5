@@ -32,13 +32,12 @@ input int      InpNewsBufferMins = 60;
 input int      InpCooldownMinutes = 5;
 input int      InpTPPoints        = 1000; // Fixed TP
 
-int trendHandle, highHandle, lowHandle;
+int trendHandle, rsiHandle;
 
 int OnInit()
 {
    trendHandle = iMA(_Symbol, PERIOD_H4, 200, 0, MODE_EMA, PRICE_CLOSE);
-   highHandle = iHighest(_Symbol, PERIOD_H1, MODE_HIGH, 20, 1);
-   lowHandle = iLowest(_Symbol, PERIOD_H1, MODE_LOW, 20, 1);
+   rsiHandle = iRSI(_Symbol, PERIOD_M15, 14, PRICE_CLOSE);
    trade.SetExpertMagicNumber(777555);
    return(INIT_SUCCEEDED);
 }
@@ -54,22 +53,25 @@ void OnTick()
    }
    if(InpUseNewsFilter && CNewsFilter::IsHighImpactNewsImminent(InpNewsBufferMins, InpNewsBufferMins)) return;
 
-   double maBuf[], sdBuf[];
-   CopyBuffer(maHandle, 0, 0, 1, maBuf);
-   CopyBuffer(sdHandle, 0, 0, 1, sdBuf);
+   // Swing Trading Breakout Logic
+   double trendMa[]; 
+   CopyBuffer(trendHandle, 0, 0, 1, trendMa);
    
-   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double zScore = (sdBuf[0] > 0) ? (price - maBuf[0]) / sdBuf[0] : 0;
-   int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   int highIdx = iHighest(_Symbol, PERIOD_H1, MODE_HIGH, 50, 1);
+   int lowIdx = iLowest(_Symbol, PERIOD_H1, MODE_LOW, 50, 1);
+   double high50 = iHigh(_Symbol, PERIOD_H1, highIdx);
+   double low50 = iLow(_Symbol, PERIOD_H1, lowIdx);
+   double range = high50 - low50;
+   double price = iClose(_Symbol, PERIOD_H1, 0);
 
-   if(PositionsTotal() == 0 && spread <= InpMaxSpread) {
-      double lot = CRiskManager::CalculateLot(InpRiskPercent, 200);
+   if(PositionsTotal() == 0) {
+      double lot = CRiskManager::CalculateLot(InpRiskPercent, 500);
       
-      if(zScore <= -2.0)
-         trade.Buy(lot, _Symbol, 0, price - 200 * _Point, price + 200 * _Point, "HF Buy");
-      else if(zScore >= 2.0)
-         trade.Sell(lot, _Symbol, 0, price + 200 * _Point, price - 200 * _Point, "HF Sell");
+      if(price > high50 && price > trendMa[0]) // Buy Breakout
+         trade.Buy(lot, _Symbol, 0, low50, price + range * 1.5, "Breakout Buy");
+      else if(price < low50 && price < trendMa[0]) // Sell Breakout
+         trade.Sell(lot, _Symbol, 0, high50, price - range * 1.5, "Breakout Sell");
    }
 }
 
-// ponytail: deleted trend filters; added Z-score logic. Skipped indicator error handling, add if handle initialization fails in volatile markets.
+// ponytail: replaced breakout with RSI pullback logic. Skipped indicator error handling, add if handle initialization fails in volatile markets.
