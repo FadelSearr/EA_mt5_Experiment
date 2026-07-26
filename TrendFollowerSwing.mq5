@@ -3,20 +3,17 @@
 //|                                     Copyright 2026, Senior Dev   |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Senior Dev"
-#property version   "3.07"
+#property version   "3.10"
 #property strict
 
 #include <Trade\Trade.mqh>
 
-input int    MaPeriod            = 20;   // EMA Periode (Default 20)
-input int    AdxPeriod           = 14;   // Periode ADX untuk filter tren
-input double AdxThreshold        = 22.0; // Batas ADX (Di bawah ini = Sideways/Konsolidasi)
-input double MaSlopeThreshold    = 0.15; // Minimum Kemiringan MA (0.15x ATR / 2 Bar) untuk saring sideways datar
-input double FixedLot            = 0.02; // Lot Transaksi
-input int    StopLossPoints      = 500;  // Fixed Stop Loss dalam Poin (Default 250 poin / 25 pips)
-input double BufferAtrMultiplier = 0.2;  // Buffer Penembusan MA (0.2x ATR)
+input int    MaPeriod         = 20;   // Periode MA & BB
+input int    AdxPeriod        = 14;   // Periode ADX
+input double AdxThreshold     = 25.0; // Batas ADX (Trending vs Sideways)
+input double FixedLot         = 0.02; // Lot Transaksi
 //---
-int    maHandle, atrHandle, adxHandle;
+int    maHandle, adxHandle, bbHandle;
 CTrade trade;
 
 #define MA_MAGIC 1234501
@@ -25,20 +22,23 @@ int OnInit(void)
 {
    trade.SetExpertMagicNumber(MA_MAGIC);
    maHandle  = iMA(_Symbol, PERIOD_M5, MaPeriod, 0, MODE_EMA, PRICE_CLOSE);
-   atrHandle = iATR(_Symbol, PERIOD_M5, 14);
    adxHandle = iADX(_Symbol, PERIOD_M5, AdxPeriod);
+   bbHandle  = iBands(_Symbol, PERIOD_M5, MaPeriod, 0, 2.0, PRICE_CLOSE);
    return(INIT_SUCCEEDED);
 }
 
 void OnTick(void)
 {
-   double ma[], atr[], adx[], ratesClose[];
+   double ma[], adx[], bbUpper[], bbLower[], ratesClose[];
    ArraySetAsSeries(ma, true);
-   ArraySetAsSeries(atr, true);
    ArraySetAsSeries(adx, true);
+   ArraySetAsSeries(bbUpper, true);
+   ArraySetAsSeries(bbLower, true);
    ArraySetAsSeries(ratesClose, true);
    
-   if(CopyBuffer(maHandle, 0, 0, 4, ma) < 4 || CopyBuffer(atrHandle, 0, 0, 2, atr) < 2 || CopyBuffer(adxHandle, 0, 0, 2, adx) < 2 || CopyClose(_Symbol, PERIOD_M5, 0, 3, ratesClose) < 3) return;
+   if(CopyBuffer(maHandle, 0, 0, 2, ma) < 2 || CopyBuffer(adxHandle, 0, 0, 2, adx) < 2 || 
+      CopyBuffer(bbHandle, 1, 0, 2, bbUpper) < 2 || CopyBuffer(bbHandle, 2, 0, 2, bbLower) < 2 || 
+      CopyClose(_Symbol, PERIOD_M5, 0, 2, ratesClose) < 2) return;
    
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -47,54 +47,27 @@ void OnTick(void)
    datetime currentCandleTime = iTime(_Symbol, PERIOD_M5, 0);
    if(currentCandleTime == lastCandleTime) return;
 
-   // Hitung kemiringan MA 20 (Slope) selama 2 candle terakhir dinormalisasi dengan ATR
-   double maSlope = (ma[1] - ma[3]) / atr[1];
+   bool isTrending = (adx[0] >= AdxThreshold);
+   bool hasPos = PositionSelect(_Symbol);
 
-   // Filter Konsolidasi Parah: Jika MA mendatar (slope di bawah threshold) ATAU ADX < 22, blokir semua entry & reversal
-   if(MathAbs(maSlope) <= MaSlopeThreshold || adx[1] < AdxThreshold) {
-       lastCandleTime = currentCandleTime;
-       return;
-   }
-
-   // Hitung zona buffer untuk menyaring noise
-   double buyThreshold  = ma[1] + atr[1] * BufferAtrMultiplier;
-   double sellThreshold = ma[1] - atr[1] * BufferAtrMultiplier;
-
-   // 1. Cek jika ada posisi aktif running (Reversal / Recovery saat candle menembus zona buffer & MA miring tegas)
-   if(PositionSelect(_Symbol)) {
-       long posType = PositionGetInteger(POSITION_TYPE);
-       if(posType == POSITION_TYPE_BUY && ratesClose[1] < sellThreshold && maSlope < -MaSlopeThreshold) {
-           trade.PositionClose(_Symbol);
-           trade.Sell(FixedLot, _Symbol, bid, bid + StopLossPoints * _Point, 0, "Price Cut Down");
-           string name = "PriceCutDown_" + TimeToString(TimeCurrent());
-           ObjectCreate(0, name, OBJ_ARROW, 0, TimeCurrent(), bid);
-           ObjectSetInteger(0, name, OBJPROP_ARROWCODE, 234);
-           ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
-       }
-       else if(posType == POSITION_TYPE_SELL && ratesClose[1] > buyThreshold && maSlope > MaSlopeThreshold) {
-           trade.PositionClose(_Symbol);
-           trade.Buy(FixedLot, _Symbol, ask, ask - StopLossPoints * _Point, 0, "Price Cut Up");
-           string name = "PriceCutUp_" + TimeToString(TimeCurrent());
-           ObjectCreate(0, name, OBJ_ARROW, 0, TimeCurrent(), ask);
-           ObjectSetInteger(0, name, OBJPROP_ARROWCODE, 233);
-           ObjectSetInteger(0, name, OBJPROP_COLOR, clrBlue);
+   // Mode 1: Trending (Momentum Following)
+   if(isTrending) {
+       if(!hasPos) {
+           if(ratesClose[0] > ma[0] && ratesClose[1] <= ma[1]) trade.Buy(FixedLot, _Symbol, ask, 0, 0, "Trend Buy");
+           if(ratesClose[0] < ma[0] && ratesClose[1] >= ma[1]) trade.Sell(FixedLot, _Symbol, bid, 0, 0, "Trend Sell");
        }
    }
-   // 2. Jika posisi kosong, entry saat candle menembus tegas zona buffer & MA miring tegas
+   // Mode 2: Sideways (Mean Reversion / Bounce Trading)
    else {
-       if(ratesClose[1] > buyThreshold && maSlope > MaSlopeThreshold) {
-           string name = "EntryBuy_" + TimeToString(TimeCurrent());
-           ObjectCreate(0, name, OBJ_ARROW, 0, TimeCurrent(), ask);
-           ObjectSetInteger(0, name, OBJPROP_ARROWCODE, 233);
-           ObjectSetInteger(0, name, OBJPROP_COLOR, clrBlue);
-           trade.Buy(FixedLot, _Symbol, ask, ask - StopLossPoints * _Point, 0, "Entry Buy");
-       } 
-       else if(ratesClose[1] < sellThreshold && maSlope < -MaSlopeThreshold) {
-           string name = "EntrySell_" + TimeToString(TimeCurrent());
-           ObjectCreate(0, name, OBJ_ARROW, 0, TimeCurrent(), bid);
-           ObjectSetInteger(0, name, OBJPROP_ARROWCODE, 234);
-           ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
-           trade.Sell(FixedLot, _Symbol, bid, bid + StopLossPoints * _Point, 0, "Entry Sell");
+       if(!hasPos) {
+           if(ratesClose[0] < bbLower[0]) trade.Buy(FixedLot, _Symbol, ask, 0, 0, "Sideways Buy (Bounce)");
+           if(ratesClose[0] > bbUpper[0]) trade.Sell(FixedLot, _Symbol, bid, 0, 0, "Sideways Sell (Bounce)");
+       }
+       // Exit Mean Reversion di MA Tengah
+       else {
+           long posType = PositionGetInteger(POSITION_TYPE);
+           if(posType == POSITION_TYPE_BUY && ratesClose[0] >= ma[0]) trade.PositionClose(_Symbol);
+           if(posType == POSITION_TYPE_SELL && ratesClose[0] <= ma[0]) trade.PositionClose(_Symbol);
        }
    }
    
@@ -104,6 +77,6 @@ void OnTick(void)
 void OnDeinit(const int reason) 
 { 
    IndicatorRelease(maHandle); 
-   IndicatorRelease(atrHandle);
    IndicatorRelease(adxHandle);
+   IndicatorRelease(bbHandle);
 }
