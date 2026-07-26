@@ -1,77 +1,57 @@
 //+------------------------------------------------------------------+
-//|                                             ZScoreScalperPro.mq5 |
+//|                                           TrendFollowerSwing.mq5 |
 //|                                     Copyright 2026, Senior Dev   |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Senior Dev"
-#property version   "1.03"
+#property version   "2.01"
 #property strict
 
 #include <Trade\Trade.mqh>
-#include "RiskManager.mqh"
-#include "NewsFilter.mqh"
-#include "DashboardView.mqh"
-#include "TrendFilter.mqh"
 
+input double MaximumRisk        = 0.02;    // Maximum Risk in percentage
+input int    MovingPeriod       = 20;      // Signal MA period
+input int    TrendPeriod        = 200;     // Trend Filter EMA period
+//---
+int    fastMaHandle, slowMaHandle, adxHandle;
 CTrade trade;
-CTrendFilter *trendFilter;
 
-input group "--- Strategy ---"
-input int      InpPeriod         = 20;
-input double   InpZEntry         = 2.2;
-input int      InpMaxSpread      = 30;
-input int      InpTrendPeriod    = 200;
+#define MA_MAGIC 1234501
 
-input group "--- Risk ---"
-input double   InpRiskPercent    = 1.0;
-input int      InpSLPoints       = 500;  // Fixed SL
-input double   InpMaxDdPct       = 5.0;
-
-input group "--- News Filter ---"
-input bool     InpUseNewsFilter  = true;
-input int      InpNewsBufferMins = 60;
-input int      InpCooldownMinutes = 5;
-input int      InpTPPoints        = 1000; // Fixed TP
-
-int trendHandle, rsiHandle;
-
-int OnInit()
+int OnInit(void)
 {
-   trendHandle = iMA(_Symbol, PERIOD_H4, 200, 0, MODE_EMA, PRICE_CLOSE);
-   rsiHandle = iRSI(_Symbol, PERIOD_M15, 14, PRICE_CLOSE);
-   trade.SetExpertMagicNumber(777555);
+   trade.SetExpertMagicNumber(MA_MAGIC);
+   fastMaHandle = iMA(_Symbol, PERIOD_M5, 20, 0, MODE_EMA, PRICE_CLOSE);
+   slowMaHandle = iMA(_Symbol, PERIOD_M5, 50, 0, MODE_EMA, PRICE_CLOSE);
+   adxHandle    = iADX(_Symbol, PERIOD_M5, 14);
    return(INIT_SUCCEEDED);
 }
 
-void OnTick()
+void OnTick(void)
 {
-   if(CRiskManager::IsDrawdownLimitHit(InpMaxDdPct)) { 
-      for(int i=PositionsTotal()-1; i>=0; i--) {
-         ulong ticket=PositionGetTicket(i);
-         if(PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL)==_Symbol) trade.PositionClose(ticket);
-      }
-      return; 
-   }
-   if(InpUseNewsFilter && CNewsFilter::IsHighImpactNewsImminent(InpNewsBufferMins, InpNewsBufferMins)) return;
-
-   // Swing Trading Breakout Logic
-   double trendMa[]; 
-   CopyBuffer(trendHandle, 0, 0, 1, trendMa);
+   // Strategy: EMA Crossover + ADX Filter (M5)
+   double fastMa[], slowMa[], adx[];
+   CopyBuffer(fastMaHandle, 0, 0, 2, fastMa);
+   CopyBuffer(slowMaHandle, 0, 0, 2, slowMa);
+   CopyBuffer(adxHandle, 0, 0, 1, adx);
    
-   int highIdx = iHighest(_Symbol, PERIOD_H1, MODE_HIGH, 50, 1);
-   int lowIdx = iLowest(_Symbol, PERIOD_H1, MODE_LOW, 50, 1);
-   double high50 = iHigh(_Symbol, PERIOD_H1, highIdx);
-   double low50 = iLow(_Symbol, PERIOD_H1, lowIdx);
-   double range = high50 - low50;
-   double price = iClose(_Symbol, PERIOD_H1, 0);
-
-   if(PositionsTotal() == 0) {
-      double lot = CRiskManager::CalculateLot(InpRiskPercent, 500);
-      
-      if(price > high50 && price > trendMa[0]) // Buy Breakout
-         trade.Buy(lot, _Symbol, 0, low50, price + range * 1.5, "Breakout Buy");
-      else if(price < low50 && price < trendMa[0]) // Sell Breakout
-         trade.Sell(lot, _Symbol, 0, high50, price - range * 1.5, "Breakout Sell");
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   if(!PositionSelect(_Symbol) && adx[0] > 25) { // ADX > 25 = Trend Strong
+      // Buy: Crossover Up
+      if(fastMa[1] < slowMa[1] && fastMa[0] > slowMa[0]) {
+         trade.Buy(0.01, _Symbol, ask, ask - 300*_Point, ask + 450*_Point, "M5 Trend Buy");
+      }
+      // Sell: Crossover Down
+      else if(fastMa[1] > slowMa[1] && fastMa[0] < slowMa[0]) {
+         trade.Sell(0.01, _Symbol, bid, bid + 300*_Point, bid - 450*_Point, "M5 Trend Sell");
+      }
    }
 }
 
-// ponytail: replaced breakout with RSI pullback logic. Skipped indicator error handling, add if handle initialization fails in volatile markets.
+void OnDeinit(const int reason) 
+{ 
+   IndicatorRelease(fastMaHandle); 
+   IndicatorRelease(slowMaHandle);
+   IndicatorRelease(adxHandle);
+}
